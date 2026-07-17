@@ -1,4 +1,8 @@
 import * as THREE from "three";
+import { EffectComposer } from "three/addons/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/addons/postprocessing/RenderPass.js";
+import { UnrealBloomPass } from "three/addons/postprocessing/UnrealBloomPass.js";
+import { OutputPass } from "three/addons/postprocessing/OutputPass.js";
 
 /* =========================================================================
    WEBSLINGER — a single-scene Three.js web-swinging / combat demo
@@ -39,26 +43,69 @@ renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+renderer.outputColorSpace = THREE.SRGBColorSpace;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x9fd4ff);
-scene.fog = new THREE.Fog(0x9fd4ff, 90, 420);
+// Golden-hour fog tint (matches the horizon color of the sky dome below)
+scene.fog = new THREE.Fog(0xff9d6c, 110, 460);
 
 const camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.position.set(0, 6, 12);
+const BASE_FOV = 70;
+
+/* ------------------------------ Post-processing ---------------------------- */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(
+  new THREE.Vector2(window.innerWidth, window.innerHeight),
+  0.85,  // strength
+  0.55,  // radius
+  0.15   // threshold — only bright things (lit windows, eye lenses) bloom
+);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
 
 window.addEventListener("resize", () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  composer.setSize(window.innerWidth, window.innerHeight);
+  bloomPass.setSize(window.innerWidth, window.innerHeight);
 });
 
+/* --------------------------------- Sky dome --------------------------------- */
+// A cheap vertical-gradient dome stands in for a real sky/atmosphere system —
+// deep blue zenith fading through dusky pink to a warm gold horizon, which is
+// what actually sells the "golden hour over the city" look more than any
+// single light does.
+function buildSkyTexture() {
+  const c = document.createElement("canvas");
+  c.width = 2; c.height = 256;
+  const ctx = c.getContext("2d");
+  const grad = ctx.createLinearGradient(0, 0, 0, 256);
+  grad.addColorStop(0.0, "#1c2c52");
+  grad.addColorStop(0.35, "#4a5490");
+  grad.addColorStop(0.62, "#e17a63");
+  grad.addColorStop(0.78, "#ffb37a");
+  grad.addColorStop(1.0, "#ffd9a0");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 2, 256);
+  return new THREE.CanvasTexture(c);
+}
+const skyDome = new THREE.Mesh(
+  new THREE.SphereGeometry(850, 24, 16),
+  new THREE.MeshBasicMaterial({ map: buildSkyTexture(), side: THREE.BackSide, fog: false, depthWrite: false })
+);
+scene.add(skyDome);
+
 /* -------------------------------- Lights ---------------------------------- */
-const hemi = new THREE.HemisphereLight(0xbfe3ff, 0x2b2b33, 0.9);
+const hemi = new THREE.HemisphereLight(0xffb37a, 0x1c2440, 0.85);
 scene.add(hemi);
 
-const sun = new THREE.DirectionalLight(0xfff2d6, 1.4);
-sun.position.set(120, 180, 80);
+const sun = new THREE.DirectionalLight(0xffd0a0, 1.9);
+sun.position.set(140, 95, 60);
 sun.castShadow = true;
 sun.shadow.mapSize.set(2048, 2048);
 sun.shadow.camera.left = -180;
@@ -69,27 +116,60 @@ sun.shadow.camera.far = 500;
 sun.shadow.bias = -0.0005;
 scene.add(sun);
 
+// Cool rim/fill light from the opposite side to keep shadow faces from
+// going flat black (cheap stand-in for bounce light / GI).
+const fill = new THREE.DirectionalLight(0x5d76ff, 0.35);
+fill.position.set(-120, 60, -80);
+scene.add(fill);
+
 /* --------------------------- Shared textures ------------------------------ */
-function buildWindowTexture() {
+function buildStructureTexture() {
+  // Base facade: concrete panels + window mullions, no bright color here —
+  // this is the physical "map", lighting does the rest.
   const c = document.createElement("canvas");
   c.width = 128; c.height = 256;
   const ctx = c.getContext("2d");
-  ctx.fillStyle = "#232733";
+  ctx.fillStyle = "#4a4f5c";
   ctx.fillRect(0, 0, c.width, c.height);
   const cols = 6, rows = 12;
   const cw = c.width / cols, ch = c.height / rows;
   for (let r = 0; r < rows; r++) {
     for (let cIdx = 0; cIdx < cols; cIdx++) {
-      const lit = Math.random() < 0.35;
-      ctx.fillStyle = lit ? "rgba(255,214,120,0.9)" : "rgba(140,160,190,0.35)";
-      ctx.fillRect(cIdx * cw + cw * 0.18, r * ch + ch * 0.22, cw * 0.64, ch * 0.56);
+      ctx.fillStyle = "rgba(30,34,42,0.55)";
+      ctx.fillRect(cIdx * cw + cw * 0.14, r * ch + ch * 0.18, cw * 0.72, ch * 0.64);
+      ctx.fillStyle = "rgba(160,180,210,0.25)";
+      ctx.fillRect(cIdx * cw + cw * 0.14, r * ch + ch * 0.18, cw * 0.72, ch * 0.1);
     }
   }
   const tex = new THREE.CanvasTexture(c);
   tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
   return tex;
 }
-const windowTex = buildWindowTexture();
+function buildEmissiveTexture() {
+  // Pure-black background with only the "lit" windows bright — used as an
+  // emissiveMap so the bloom pass picks out just the glowing windows.
+  const c = document.createElement("canvas");
+  c.width = 128; c.height = 256;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = "#000000";
+  ctx.fillRect(0, 0, c.width, c.height);
+  const cols = 6, rows = 12;
+  const cw = c.width / cols, ch = c.height / rows;
+  for (let r = 0; r < rows; r++) {
+    for (let cIdx = 0; cIdx < cols; cIdx++) {
+      if (Math.random() < 0.32) {
+        const warm = Math.random() < 0.7;
+        ctx.fillStyle = warm ? "#ffd27a" : "#a9c8ff";
+        ctx.fillRect(cIdx * cw + cw * 0.2, r * ch + ch * 0.24, cw * 0.6, ch * 0.52);
+      }
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+const structureTex = buildStructureTexture();
+const emissiveTex = buildEmissiveTexture();
 
 function buildGroundTexture() {
   const c = document.createElement("canvas");
@@ -118,7 +198,7 @@ scene.add(ground);
 const buildings = []; // { minX,maxX,minY,maxY,minZ,maxZ, mesh }
 const buildingMeshes = [];
 
-const buildingPalette = [0x8a8f9c, 0x9c8a7c, 0x7c8a9c, 0xa39a8a, 0x8f97a3, 0x7a7f8c];
+const buildingPalette = [0x8a8f9c, 0xb08d78, 0x8095ab, 0xb5a58e, 0x93a0ad, 0x7c828f, 0xc9a583];
 
 function generateCity() {
   for (let i = -CITY_HALF; i <= CITY_HALF; i++) {
@@ -133,15 +213,24 @@ function generateCity() {
       const cx = i * BLOCK_SPACING + (Math.random() - 0.5) * 4;
       const cz = j * BLOCK_SPACING + (Math.random() - 0.5) * 4;
 
+      const map = structureTex.clone();
+      const emissiveMap = emissiveTex.clone();
+      const repeatX = Math.max(1, Math.round(w / 4));
+      const repeatY = Math.max(1, Math.round(h / 4));
+      map.repeat.set(repeatX, repeatY);
+      emissiveMap.repeat.set(repeatX, repeatY);
+      map.needsUpdate = true;
+      emissiveMap.needsUpdate = true;
+
       const mat = new THREE.MeshStandardMaterial({
-        map: windowTex,
+        map,
+        emissiveMap,
+        emissive: new THREE.Color(0xffffff),
+        emissiveIntensity: 1.6,
         color: buildingPalette[Math.floor(Math.random() * buildingPalette.length)],
-        roughness: 0.85,
-        metalness: 0.05,
+        roughness: 0.8,
+        metalness: 0.1,
       });
-      mat.map = windowTex.clone();
-      mat.map.needsUpdate = true;
-      mat.map.repeat.set(Math.max(1, Math.round(w / 4)), Math.max(1, Math.round(h / 4)));
 
       const geo = new THREE.BoxGeometry(w, h, d);
       const mesh = new THREE.Mesh(geo, mat);
@@ -157,6 +246,23 @@ function generateCity() {
         minZ: cz - d / 2, maxZ: cz + d / 2,
         mesh,
       });
+
+      // Rooftop detail: setback cap on taller towers + antenna/water-tower
+      // silhouette so the skyline reads as varied rather than a field of
+      // identical boxes.
+      if (h > 45 && Math.random() < 0.6) {
+        const capW = w * 0.55, capD = d * 0.55, capH = 4 + Math.random() * 8;
+        const cap = new THREE.Mesh(new THREE.BoxGeometry(capW, capH, capD), mat);
+        cap.position.set(cx, h + capH / 2, cz);
+        cap.castShadow = true;
+        scene.add(cap);
+      } else if (h > 20 && Math.random() < 0.4) {
+        const towerMat = new THREE.MeshStandardMaterial({ color: 0x3a3d44, roughness: 0.9 });
+        const tower = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1.1, 3.2, 8), towerMat);
+        tower.position.set(cx + w * 0.25, h + 1.6, cz + d * 0.25);
+        tower.castShadow = true;
+        scene.add(tower);
+      }
     }
   }
 }
@@ -165,11 +271,32 @@ generateCity();
 /* ------------------------------- Player ------------------------------------ */
 // Procedural low-poly "suited hero" — red torso/head, blue limbs, simple
 // webbed-pattern via vertex colors substitute (flat colors keep perf high).
+function buildWebPatternTexture(baseColor) {
+  // Thin black web-lines over a base suit color — cheap stand-in for the
+  // iconic Spidey web-pattern suit texture.
+  const c = document.createElement("canvas");
+  c.width = c.height = 256;
+  const ctx = c.getContext("2d");
+  ctx.fillStyle = baseColor;
+  ctx.fillRect(0, 0, 256, 256);
+  ctx.strokeStyle = "rgba(15,15,20,0.55)";
+  ctx.lineWidth = 2;
+  const step = 32;
+  for (let i = -256; i < 512; i += step) {
+    ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i + 256, 256); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(i, 256); ctx.lineTo(i + 256, 0); ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 2);
+  return tex;
+}
+
 function buildHeroMesh() {
   const group = new THREE.Group();
 
-  const redMat = new THREE.MeshStandardMaterial({ color: 0xc41e2e, roughness: 0.55, metalness: 0.1 });
-  const blueMat = new THREE.MeshStandardMaterial({ color: 0x1c3fae, roughness: 0.5, metalness: 0.15 });
+  const redMat = new THREE.MeshStandardMaterial({ map: buildWebPatternTexture("#c41e2e"), roughness: 0.5, metalness: 0.12 });
+  const blueMat = new THREE.MeshStandardMaterial({ map: buildWebPatternTexture("#1c3fae"), roughness: 0.45, metalness: 0.18 });
 
   const torso = new THREE.Mesh(new THREE.CapsuleGeometry(0.32, 0.55, 4, 8), redMat);
   torso.position.y = 1.05;
@@ -181,11 +308,13 @@ function buildHeroMesh() {
   head.castShadow = true;
   group.add(head);
 
-  // eyes (simple white lenses)
-  const lensMat = new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0x222222 });
-  const lensGeo = new THREE.SphereGeometry(0.06, 8, 8);
-  const lensL = new THREE.Mesh(lensGeo, lensMat); lensL.position.set(-0.09, 1.58, 0.19); group.add(lensL);
-  const lensR = new THREE.Mesh(lensGeo, lensMat); lensR.position.set(0.09, 1.58, 0.19); group.add(lensR);
+  // Big expressive glowing eye-lenses — bloom picks these up nicely
+  const lensMat = new THREE.MeshStandardMaterial({ color: 0xf5f7ff, emissive: 0xdbe6ff, emissiveIntensity: 2.2 });
+  const lensGeo = new THREE.SphereGeometry(0.075, 10, 10);
+  const lensL = new THREE.Mesh(lensGeo, lensMat);
+  lensL.position.set(-0.1, 1.59, 0.19); lensL.scale.set(1.2, 0.75, 0.6); group.add(lensL);
+  const lensR = new THREE.Mesh(lensGeo, lensMat);
+  lensR.position.set(0.1, 1.59, 0.19); lensR.scale.set(1.2, 0.75, 0.6); group.add(lensR);
 
   function limb(len, mat) {
     const m = new THREE.Mesh(new THREE.CapsuleGeometry(0.09, len, 3, 6), mat);
@@ -267,6 +396,53 @@ function updateWebLine(line, from, to, sagAmount, t) {
     positions[i * 3 + 2] = pts[i].z;
   }
   line.geometry.attributes.position.needsUpdate = true;
+}
+
+/* ------------------------------- Speed trail -------------------------------- */
+// A small pool of additive-blended glow sprites trailing the player when
+// moving fast, to sell momentum during swings/zips without a full particle system.
+function buildGlowSpriteTexture() {
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const ctx = c.getContext("2d");
+  const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, "rgba(255,255,255,0.9)");
+  grad.addColorStop(0.4, "rgba(170,200,255,0.5)");
+  grad.addColorStop(1, "rgba(170,200,255,0)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+const glowTex = buildGlowSpriteTexture();
+const TRAIL_COUNT = 14;
+const trailSprites = [];
+const trailHistory = [];
+for (let i = 0; i < TRAIL_COUNT; i++) {
+  const mat = new THREE.SpriteMaterial({ map: glowTex, transparent: true, opacity: 0, blending: THREE.AdditiveBlending, depthWrite: false });
+  const sprite = new THREE.Sprite(mat);
+  sprite.scale.set(0.01, 0.01, 0.01);
+  scene.add(sprite);
+  trailSprites.push(sprite);
+}
+function updateSpeedTrail(dt) {
+  const speed = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z);
+  const active = (player.state === "swinging" || player.state === "zipping") && speed > 14;
+  if (active) {
+    trailHistory.unshift(player.position.clone());
+    if (trailHistory.length > TRAIL_COUNT) trailHistory.length = TRAIL_COUNT;
+  } else if (trailHistory.length > 0) {
+    trailHistory.pop();
+  }
+  for (let i = 0; i < TRAIL_COUNT; i++) {
+    const sprite = trailSprites[i];
+    const p = trailHistory[i];
+    if (!p) { sprite.material.opacity = 0; continue; }
+    sprite.position.copy(p);
+    const age = i / TRAIL_COUNT;
+    sprite.material.opacity = (1 - age) * 0.55;
+    const s = 0.35 * (1 - age * 0.7);
+    sprite.scale.set(s, s, s);
+  }
 }
 
 /* -------------------------------- Enemies ------------------------------------- */
@@ -732,6 +908,7 @@ function checkGroundedLanding() {
 
 /* ----------------------------------- Camera ------------------------------------- */
 const camOffset = new THREE.Vector3();
+let currentFov = BASE_FOV;
 function updateCamera(dt) {
   const dist = 7.5;
   const height = 2.6;
@@ -746,6 +923,21 @@ function updateCamera(dt) {
   const lookTarget = new THREE.Vector3().copy(player.position);
   lookTarget.y += 0.8;
   camera.lookAt(lookTarget);
+
+  // FOV kick: widen the lens as speed climbs, classic "going fast" cue
+  const speed = Math.hypot(player.velocity.x, player.velocity.y, player.velocity.z);
+  const targetFov = BASE_FOV + THREE.MathUtils.clamp(speed - 8, 0, 30) * 0.5;
+  currentFov = THREE.MathUtils.lerp(currentFov, targetFov, 1 - Math.pow(0.0005, dt));
+  camera.fov = currentFov;
+  camera.updateProjectionMatrix();
+
+  // Dutch tilt while swinging, proportional to lateral velocity — sells the
+  // pendulum arc the way a handheld chase-cam would.
+  let targetTilt = 0;
+  if (player.state === "swinging") {
+    targetTilt = THREE.MathUtils.clamp(-player.velocity.x * 0.012, -0.16, 0.16);
+  }
+  camera.rotateZ(targetTilt);
 }
 
 /* --------------------------------- Hero pose/animation ---------------------------------- */
@@ -963,12 +1155,13 @@ function animate() {
 
     updateEnemies(dt);
     updateHeroVisual(dt);
+    updateSpeedTrail(dt);
     updateCamera(dt);
     updateStatusHud();
     drawMinimap();
   }
 
-  renderer.render(scene, camera);
+  composer.render();
 }
 
 animate();
