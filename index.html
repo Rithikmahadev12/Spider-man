@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>WEB SLINGER // Clear The City</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js"
+  }
+}
+</script>
+<style>
+  html, body { margin:0; padding:0; overflow:hidden; background:#05070c; height:100%; width:100%; }
+  #app { position:relative; width:100vw; height:100vh; }
+  canvas { display:block; }
+  .font-display { font-family: 'Arial Black', Impact, 'Franklin Gothic Bold', sans-serif; letter-spacing: 0.03em; }
+  .font-mono2 { font-family: 'Consolas', 'Menlo', monospace; }
+  .comic-outline { -webkit-text-stroke: 1.5px #05070c; }
+  .scanline-panel {
+    background: linear-gradient(180deg, rgba(10,14,22,0.85), rgba(10,14,22,0.65));
+    border: 1px solid rgba(220,38,38,0.35);
+    box-shadow: 0 0 0 1px rgba(59,102,241,0.15) inset, 0 8px 24px rgba(0,0,0,0.45);
+  }
+  #crosshair {
+    position:absolute; top:50%; left:50%; width:6px; height:6px;
+    transform:translate(-50%,-50%); border-radius:50%;
+    background:rgba(255,255,255,0.9); box-shadow:0 0 6px rgba(255,255,255,0.6);
+    pointer-events:none;
+  }
+  #crosshair.locked-on { background:#ef4444; box-shadow:0 0 10px #ef4444; }
+  .btn-primary {
+    background: linear-gradient(180deg,#ef2b2b,#b3121b);
+    box-shadow: 0 4px 0 #7a0d13, 0 8px 18px rgba(0,0,0,0.5);
+  }
+  .btn-primary:active { transform: translateY(3px); box-shadow: 0 1px 0 #7a0d13; }
+  #webLinePrompt { text-shadow: 0 2px 6px rgba(0,0,0,0.8); }
+  ::selection { background: #ef4444; color:white; }
+</style>
+</head>
+<body>
+<div id="app">
+  <canvas id="scene"></canvas>
+
+  <!-- Crosshair -->
+  <div id="crosshair"></div>
+
+  <!-- Top-left: mission / controls reminder -->
+  <div id="topLeftHud" class="hidden absolute top-4 left-4 select-none pointer-events-none">
+    <div class="scanline-panel rounded-lg px-4 py-2 text-white">
+      <div class="text-[10px] tracking-[0.25em] text-blue-400 font-mono2">ACTIVE MISSION</div>
+      <div class="font-display text-lg text-red-500 comic-outline">CLEAR THE CITY</div>
+    </div>
+  </div>
+
+  <!-- Top-right: score / status -->
+  <div id="topRightHud" class="hidden absolute top-4 right-4 select-none pointer-events-none text-right">
+    <div class="scanline-panel rounded-lg px-4 py-3 text-white min-w-[190px]">
+      <div class="text-[10px] tracking-[0.25em] text-blue-400 font-mono2">BAD GUYS DEFEATED</div>
+      <div id="scoreVal" class="font-display text-3xl text-white leading-none mt-0.5">0</div>
+      <div class="h-px bg-white/10 my-2"></div>
+      <div class="flex justify-between text-[11px] font-mono2 text-white/70">
+        <span>STATE</span><span id="stateVal" class="text-red-400">GROUND</span>
+      </div>
+      <div class="flex justify-between text-[11px] font-mono2 text-white/70">
+        <span>SPEED</span><span id="speedVal" class="text-blue-300">0 u/s</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom-right: minimap -->
+  <div id="minimapWrap" class="hidden absolute bottom-4 right-4 select-none pointer-events-none">
+    <div class="scanline-panel rounded-full p-1">
+      <canvas id="minimap" width="180" height="180" class="rounded-full"></canvas>
+    </div>
+    <div class="text-center text-[9px] font-mono2 text-white/50 mt-1 tracking-widest">CITY GRID</div>
+  </div>
+
+  <!-- Bottom-left: control hints -->
+  <div id="controlsHud" class="hidden absolute bottom-4 left-4 select-none pointer-events-none">
+    <div class="scanline-panel rounded-lg px-3 py-2 text-white/70 text-[11px] font-mono2 leading-relaxed">
+      <div><span class="text-white">WASD</span> move &nbsp; <span class="text-white">MOUSE</span> look</div>
+      <div><span class="text-white">CLICK+HOLD</span> web-swing &nbsp; <span class="text-white">RELEASE</span> launch</div>
+      <div><span class="text-white">SPACE</span> jump / boost &nbsp; <span class="text-white">CLICK</span> near foe = attack</div>
+    </div>
+  </div>
+
+  <!-- Center prompt (e.g. "no anchor") -->
+  <div id="centerPrompt" class="hidden absolute top-[38%] left-1/2 -translate-x-1/2 select-none pointer-events-none text-white/80 font-mono2 text-sm tracking-wider" id="webLinePrompt"></div>
+
+  <!-- Mission complete banner -->
+  <div id="missionBanner" class="hidden absolute top-1/4 left-1/2 -translate-x-1/2 select-none pointer-events-none text-center">
+    <div class="font-display text-4xl text-red-500 comic-outline" style="text-shadow:0 0 24px rgba(239,68,68,0.6)">SECTOR CLEARED</div>
+    <div class="text-white/70 font-mono2 text-xs mt-1 tracking-widest">NEW THREATS INBOUND...</div>
+  </div>
+
+  <!-- Start overlay -->
+  <div id="startOverlay" class="absolute inset-0 flex items-center justify-center bg-[#05070c]">
+    <div class="absolute inset-0 opacity-40" style="background:radial-gradient(circle at 50% 30%, rgba(239,68,68,0.18), transparent 55%), radial-gradient(circle at 30% 80%, rgba(59,102,241,0.18), transparent 50%);"></div>
+    <div class="relative text-center px-6">
+      <div class="font-display comic-outline text-white text-6xl md:text-7xl tracking-tight" style="text-shadow:0 0 30px rgba(239,68,68,0.5)">
+        WEB<span class="text-red-500">SLINGER</span>
+      </div>
+      <div class="font-mono2 text-blue-300/80 text-xs tracking-[0.4em] mt-2">A ROOFTOP-TO-ROOFTOP COMBAT DEMO</div>
+
+      <button id="playBtn" class="btn-primary font-display text-white text-xl px-10 py-3 rounded mt-10 tracking-wide">
+        PLAY
+      </button>
+
+      <div class="mt-8 text-white/50 font-mono2 text-[11px] max-w-md mx-auto leading-relaxed">
+        Click PLAY to enter fullscreen &amp; lock your mouse.<br/>
+        Swing between rooftops, clear enemy squads, keep your momentum.
+      </div>
+    </div>
+  </div>
+
+  <!-- Pause overlay (shown when pointer lock is lost) -->
+  <div id="pauseOverlay" class="hidden absolute inset-0 flex items-center justify-center bg-black/70 backdrop-blur-sm">
+    <div class="text-center px-6">
+      <div class="font-display comic-outline text-white text-4xl">PAUSED</div>
+      <div class="text-white/50 font-mono2 text-xs mt-2 tracking-widest">POINTER LOCK RELEASED</div>
+      <button id="resumeBtn" class="btn-primary font-display text-white text-lg px-8 py-3 rounded mt-8 tracking-wide">
+        RESUME
+      </button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="./game.js"></script>
+</body>
+</html>
